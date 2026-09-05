@@ -70,6 +70,10 @@ YAHOO_SAMPLE = json.dumps({"chart": {"result": [{
 FRED_SAMPLE = ("observation_date,NASDAQ100\n2026-09-01,29456.97\n"
                "2026-09-02,.\n2026-09-03,29482.32\n")
 CBOE_SAMPLE = "DATE,OPEN,HIGH,LOW,CLOSE\n2026-09-03,15.25,15.44,14.23,14.32\n"
+NASDAQ_SAMPLE = json.dumps({"data": {"tradesTable": {"rows": [
+    {"date": "09/04/2026", "close": "29,544.15", "volume": "6,529,110,000"},
+    {"date": "09/03/2026", "close": "29,482.32", "volume": "7,600,140,000"}]}}})
+STOOQ_DENIED = "Access denied"
 
 y = fetch.parse_yahoo(YAHOO_SAMPLE)
 check("yahoo 파서 · 행수", len(y), 5)
@@ -79,6 +83,23 @@ check("yahoo 파서 · 최종 날짜", max(y), "20260904")
 fr = fetch.parse_fred(FRED_SAMPLE)
 check("fred 파서 · 결측(.) 제외 후 행수", len(fr), 2)
 check("fred 파서 · 최종 종가", fr["20260903"], 29482.32)
+
+nq = fetch.parse_nasdaq(NASDAQ_SAMPLE)
+check("nasdaq 파서 · 행수", len(nq), 2)
+check("nasdaq 파서 · 쉼표 제거 후 종가", nq["20260904"], 29544.15)
+
+# stooq 가 HTTP 200 과 함께 "Access denied" 를 줄 때 반드시 거부해야 한다
+try:
+    fetch.stooq.__wrapped__ if False else None
+    orig = fetch._get
+    fetch._get = lambda *a, **k: STOOQ_DENIED
+    try:
+        fetch.stooq("^ndx")
+        check("stooq 위장 응답 거부", "통과시킴", "예외 발생")
+    except fetch.FetchError:
+        check("stooq 위장 응답 거부", "예외 발생", "예외 발생")
+finally:
+    fetch._get = orig
 
 import csv as _csv           # noqa: E402
 import io as _io             # noqa: E402
