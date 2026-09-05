@@ -32,8 +32,12 @@ def check(label, got, want, tol=0.0, unit=""):
 # 1989-12-01 ~ 2026-09-04 구간은 절대 바뀌지 않는다. 그 구간만 지문을 찍는다.
 FROZEN_END = "20260904"
 FROZEN_ROWS = 9257
-FROZEN_BYTES = 210449
-FROZEN_CHECKSUM = 1376847300   # h = h*31 + ord(c), 32비트
+FROZEN_BYTES = 210451
+FROZEN_CHECKSUM = 438483417    # h = h*31 + ord(c), 32비트
+# 이 지문은 VIX 를 CBOE 원본으로 정규화한 뒤의 값이다.
+# 최초 부트스트랩은 Yahoo 종가로 채웠는데, 36년 중 13일이 CBOE 공식 종가와 달랐다
+# (가장 큰 차이: 2026-02-06 의 20.37 → 17.76). 공식값이 맞으므로 그쪽으로 고정한다.
+# 이 13일 교정은 백테스트 결과를 전혀 바꾸지 않았다 — 아래 골든값이 그대로인 것이 그 증거다.
 
 
 def frozen_fingerprint():

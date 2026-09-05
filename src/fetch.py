@@ -9,13 +9,15 @@ GitHub Actions 러너에서 돌아간다는 전제가 설계를 지배한다.
   FRED NASDAQ100 CSV   — 세인트루이스 연준. 러너에서 가장 안정적. 다만 미 동부 밤에 갱신돼
                           당일치는 하루 늦게 들어온다.
   Nasdaq 공식 API      — 장 마감 직후 당일 종가가 바로 올라온다.
-  Yahoo chart (q1/q2)  — 되면 좋고 안 되면 마는 보조. 러너에서는 429 가 잦다.
-  stooq                — 마지막 보조. HTTP 200 과 함께 "Access denied" 를 주는 일이 있어
-                          헤더 모양까지 확인한 뒤에만 받아들인다.
+  Yahoo chart (q1/q2)  — 재시도를 붙이면 러너에서도 잘 붙는다. 429 는 대개 일시적이다.
+
+  stooq 는 뺐다 — 러너에서 CSV 대신 HTML 을 돌려주는 것을 실측했다(2026-09).
+  FRED 도 러너에서 읽기 타임아웃이 잦아 1회만 짧게 시도하는 보조로 내렸다.
 
 소스 (VIX)
-  CBOE 원본 미러(raw.githubusercontent) — 러너에서 사실상 항상 된다
-  Yahoo, stooq                          — 보조
+  CBOE 원본 미러(raw.githubusercontent) — 러너에서 사실상 항상 된다. 공식 종가라 권위가 있어
+                                          과거 값이 어긋나면 이쪽으로 교정한다.
+  Yahoo (q1/q2)                        — 보조. 미러가 하루 늦을 때 당일치를 메운다.
 
 실패 원칙
   · NDX 소스가 하나도 안 열리면  → 죽는다(워크플로 실패 → 메일).
@@ -43,8 +45,12 @@ MARKET = os.path.join(ROOT, "data", "market.csv")
 
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36")
-TIMEOUT = 45
+TIMEOUT = 30
 TRIES = 3
+# 소스별 (재시도, 타임아웃). 잘 죽는 소스에 시간을 오래 쓰지 않는다 —
+# 잡 전체 제한이 10분이라, 느린 소스 하나가 나머지를 잡아먹으면 안 된다.
+BUDGET = {"fred": (1, 20), "nasdaq": (3, 30), "yahoo-q1": (2, 20), "yahoo-q2": (2, 20),
+          "cboe-mirror": (3, 30)}
 
 MAX_DAILY_MOVE = 0.15      # 지수 하루 변동 한계
 MAX_SOURCE_DIFF = 0.005    # 소스 간 허용 오차 0.5%
@@ -80,7 +86,8 @@ def _get(url, headers=None, tries=TRIES, timeout=TIMEOUT):
 def yahoo(symbol, rng="3mo", host="query1"):
     url = (f"https://{host}.finance.yahoo.com/v8/finance/chart/"
            f"{urllib.parse.quote(symbol)}?range={rng}&interval=1d")
-    return parse_yahoo(_get(url), symbol)
+    t, to = BUDGET["yahoo-q1" if host == "query1" else "yahoo-q2"]
+    return parse_yahoo(_get(url, tries=t, timeout=to), symbol)
 
 
 def parse_yahoo(text, symbol="?"):
@@ -94,7 +101,8 @@ def parse_yahoo(text, symbol="?"):
     for t, c in zip(ts, cl):
         if c is None:
             continue
-        out[datetime.datetime.utcfromtimestamp(t).strftime("%Y%m%d")] = float(c)
+        out[datetime.datetime.fromtimestamp(t, datetime.timezone.utc)
+            .strftime("%Y%m%d")] = float(c)
     if not out:
         raise FetchError(f"yahoo {symbol}: 종가 없음")
     return out
@@ -105,7 +113,8 @@ def fred(series="NASDAQ100", days=150):
     start = end - datetime.timedelta(days=days)
     url = ("https://fred.stlouisfed.org/graph/fredgraph.csv"
            f"?id={series}&cosd={start}&coed={end}")
-    return parse_fred(_get(url), series)
+    t, to = BUDGET["fred"]
+    return parse_fred(_get(url, tries=t, timeout=to), series)
 
 
 def parse_fred(text, series="?"):
@@ -131,8 +140,10 @@ def nasdaq(symbol="NDX", days=120):
     start = end - datetime.timedelta(days=days)
     url = (f"https://api.nasdaq.com/api/quote/{symbol}/historical"
            f"?assetclass=index&fromdate={start}&todate={end}&limit=250")
+    t, to = BUDGET["nasdaq"]
     return parse_nasdaq(_get(url, {"Accept": "application/json",
-                                   "Referer": "https://www.nasdaq.com/"}), symbol)
+                                   "Referer": "https://www.nasdaq.com/"},
+                             tries=t, timeout=to), symbol)
 
 
 def parse_nasdaq(text, symbol="?"):
@@ -154,6 +165,9 @@ def parse_nasdaq(text, symbol="?"):
 
 
 def stooq(symbol):
+    """지금은 소스 목록에서 빠져 있다(러너에서 HTML 을 돌려줌).
+    위장 응답을 거르는 이 검사 자체는 자가진단에서 계속 검증한다 —
+    나중에 stooq 를 되살릴 때 같은 함정에 다시 빠지지 않도록."""
     url = f"https://stooq.com/q/d/l/?s={urllib.parse.quote(symbol)}&i=d"
     txt = _get(url)
     head = txt.splitlines()[0] if txt.strip() else ""
@@ -216,13 +230,11 @@ def main():
         ("nasdaq",   lambda: nasdaq("NDX")),
         ("yahoo-q1", lambda: yahoo("^NDX", host="query1")),
         ("yahoo-q2", lambda: yahoo("^NDX", host="query2")),
-        ("stooq",    lambda: stooq("^ndx")),
     ])
     vix_ok, vix_bad = gather([
         ("cboe-mirror", cboe_vix_mirror),
         ("yahoo-q1",    lambda: yahoo("^VIX", host="query1")),
         ("yahoo-q2",    lambda: yahoo("^VIX", host="query2")),
-        ("stooq",       lambda: stooq("^vix")),
     ])
 
     report = {"stored_last": last["date"],
